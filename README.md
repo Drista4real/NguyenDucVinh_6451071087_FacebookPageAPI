@@ -116,3 +116,60 @@ dotnet build BackendAPI/BackendAPI.csproj
 dotnet test Webhook-Service.Tests/Webhook-Service.Tests.csproj
 docker compose config
 ```
+
+## Core Service and Retry Service
+
+`core-service` runs on port `3002`, consumes `raw_events`, performs AI + rule
+automation, stores processing state in PostgreSQL, and publishes only valid
+Backend API commands to `reply_commands`. Unsupported events are marked
+`skipped`; events that need a human are marked `pending_review` and are not
+published as invalid Kafka commands.
+
+Core uses OpenAI when `OPENAI_API_KEY` is configured. Missing keys, timeouts,
+HTTP failures, refusals, or invalid JSON fall back to deterministic rule-based
+analysis. Configure with:
+
+```text
+OPENAI_API_KEY=...
+OPENAI_MODEL=gpt-5.4-mini
+```
+
+Core creates `core_event_processing` and `core_user_blacklist` with
+`CREATE TABLE IF NOT EXISTS`. It deduplicates by `event_id`, allows stale
+`processing` rows older than 5 minutes to be retried, sends the 20th comment in
+60 seconds from the same user to `pending_review`, and blacklists a user after
+3 spam comments in 24 hours.
+
+`retry-service` runs on port `3003`, consumes Backend API `send_failed`
+envelopes, and publishes either the original `FacebookCommand` to `send_retry`
+or a snake_case DLQ message to `dead_letter`.
+
+```json
+{
+  "command": {
+    "command_id": "cmd-001",
+    "event_id": "event-001",
+    "action": "reply_comment",
+    "target_id": "facebook-comment-id",
+    "page_id": "facebook-page-id",
+    "message": "Thanks for contacting us.",
+    "retry_count": 0
+  },
+  "retry_count": 0,
+  "retryable": true,
+  "error": "timeout",
+  "failed_at": "2026-06-06T00:00:00Z"
+}
+```
+
+`retryable=false` and `retry_count >= 5` go directly to `dead_letter`. Retryable
+messages wait with exponential backoff `1, 2, 4, 8, 16` seconds and then publish
+the same command to `send_retry` with `retry_count` incremented.
+
+Additional checks:
+
+```powershell
+dotnet build BackendAPI/page_api.sln
+dotnet test CoreService.Tests/CoreService.Tests.csproj
+dotnet test Retry-Service.Tests/Retry-Service.Tests.csproj
+```

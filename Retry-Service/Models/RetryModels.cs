@@ -2,105 +2,112 @@ using System.Text.Json.Serialization;
 
 namespace RetryService.Models;
 
-public class SendFailedMessage
+public sealed record FacebookCommand
 {
-    [JsonPropertyName("commandId")]
-    public string CommandId { get; set; } = string.Empty;
-
-    [JsonPropertyName("eventId")]
-    public string EventId { get; set; } = string.Empty;
+    [JsonPropertyName("command_id")]
+    public string CommandId { get; init; } = string.Empty;
 
     [JsonPropertyName("action")]
-    public string Action { get; set; } = string.Empty;
+    public string Action { get; init; } = string.Empty;
 
-    [JsonPropertyName("replyText")]
-    public string ReplyText { get; set; } = string.Empty;
+    [JsonPropertyName("target_id")]
+    public string? TargetId { get; init; }
 
-    [JsonPropertyName("timestamp")]
-    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+    [JsonPropertyName("page_id")]
+    public string? PageId { get; init; }
 
-    [JsonPropertyName("retryCount")]
-    public int RetryCount { get; set; } = 0;
+    [JsonPropertyName("message")]
+    public string? Message { get; init; }
 
-    [JsonPropertyName("lastError")]
-    public string LastError { get; set; } = string.Empty;
+    [JsonPropertyName("retry_count")]
+    public int RetryCount { get; init; }
+
+    [JsonPropertyName("event_id")]
+    public string? EventId { get; init; }
 }
 
-public class SendRetryMessage
+public sealed record SendFailedMessage
 {
-    [JsonPropertyName("commandId")]
-    public string CommandId { get; set; } = string.Empty;
+    [JsonPropertyName("command")]
+    public FacebookCommand? Command { get; init; }
 
-    [JsonPropertyName("eventId")]
-    public string EventId { get; set; } = string.Empty;
+    [JsonPropertyName("retry_count")]
+    public int RetryCount { get; init; }
 
-    [JsonPropertyName("action")]
-    public string Action { get; set; } = string.Empty;
+    [JsonPropertyName("retryable")]
+    public bool Retryable { get; init; }
 
-    [JsonPropertyName("replyText")]
-    public string ReplyText { get; set; } = string.Empty;
+    [JsonPropertyName("error")]
+    public string Error { get; init; } = string.Empty;
 
-    [JsonPropertyName("timestamp")]
-    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
-
-    [JsonPropertyName("retryCount")]
-    public int RetryCount { get; set; } = 0;
-
-    [JsonPropertyName("nextRetryTime")]
-    public DateTime NextRetryTime { get; set; } = DateTime.UtcNow;
-
-    [JsonPropertyName("lastError")]
-    public string LastError { get; set; } = string.Empty;
+    [JsonPropertyName("failed_at")]
+    public DateTimeOffset FailedAt { get; init; } = DateTimeOffset.UtcNow;
 }
 
-public class DeadLetterMessage
+public sealed record DeadLetterMessage
 {
-    [JsonPropertyName("commandId")]
-    public string CommandId { get; set; } = string.Empty;
+    [JsonPropertyName("command")]
+    public required FacebookCommand Command { get; init; }
 
-    [JsonPropertyName("eventId")]
-    public string EventId { get; set; } = string.Empty;
+    [JsonPropertyName("retry_count")]
+    public int RetryCount { get; init; }
 
-    [JsonPropertyName("action")]
-    public string Action { get; set; } = string.Empty;
+    [JsonPropertyName("retryable")]
+    public bool Retryable { get; init; }
 
-    [JsonPropertyName("replyText")]
-    public string ReplyText { get; set; } = string.Empty;
+    [JsonPropertyName("error")]
+    public string Error { get; init; } = string.Empty;
 
-    [JsonPropertyName("originalTimestamp")]
-    public DateTime OriginalTimestamp { get; set; } = DateTime.UtcNow;
+    [JsonPropertyName("failed_at")]
+    public DateTimeOffset FailedAt { get; init; }
 
-    [JsonPropertyName("failedAt")]
-    public DateTime FailedAt { get; set; } = DateTime.UtcNow;
-
-    [JsonPropertyName("totalRetries")]
-    public int TotalRetries { get; set; } = 0;
-
-    [JsonPropertyName("lastError")]
-    public string LastError { get; set; } = string.Empty;
+    [JsonPropertyName("dead_lettered_at")]
+    public DateTimeOffset DeadLetteredAt { get; init; } = DateTimeOffset.UtcNow;
 
     [JsonPropertyName("reason")]
-    public string Reason { get; set; } = string.Empty;
+    public string Reason { get; init; } = string.Empty;
 }
 
-public class RetryPolicy
+public sealed class RetryPolicy
 {
     public int MaxRetryAttempts { get; set; } = 5;
     public int InitialBackoffSeconds { get; set; } = 1;
     public double BackoffMultiplier { get; set; } = 2.0;
-    public int MaxBackoffSeconds { get; set; } = 300; // 5 minutes max
+    public int MaxBackoffSeconds { get; set; } = 300;
 
-    public int CalculateBackoffSeconds(int retryCount)
+    public TimeSpan CalculateBackoff(int currentRetryCount)
     {
-        if (retryCount == 0)
-            return 0;
-
-        var backoffSeconds = (int)(InitialBackoffSeconds * Math.Pow(BackoffMultiplier, retryCount - 1));
-        return Math.Min(backoffSeconds, MaxBackoffSeconds);
+        var seconds = InitialBackoffSeconds *
+                      Math.Pow(BackoffMultiplier, Math.Max(0, currentRetryCount));
+        return TimeSpan.FromSeconds(Math.Min(seconds, MaxBackoffSeconds));
     }
 
-    public bool ShouldRetry(int currentRetryCount)
+    public void Validate()
     {
-        return currentRetryCount < MaxRetryAttempts;
+        if (MaxRetryAttempts < 1)
+        {
+            throw new InvalidOperationException("RetryPolicy:MaxRetryAttempts must be >= 1.");
+        }
+
+        if (InitialBackoffSeconds < 0)
+        {
+            throw new InvalidOperationException("RetryPolicy:InitialBackoffSeconds must be >= 0.");
+        }
+
+        if (BackoffMultiplier < 1)
+        {
+            throw new InvalidOperationException("RetryPolicy:BackoffMultiplier must be >= 1.");
+        }
+
+        if (MaxBackoffSeconds < InitialBackoffSeconds)
+        {
+            throw new InvalidOperationException(
+                "RetryPolicy:MaxBackoffSeconds must be >= InitialBackoffSeconds.");
+        }
     }
 }
+
+public sealed record RetryDecision(
+    bool ShouldRetry,
+    TimeSpan Backoff,
+    string Reason);

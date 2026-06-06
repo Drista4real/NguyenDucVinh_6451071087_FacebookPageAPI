@@ -1,63 +1,73 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace CoreService.Models;
 
-/// <summary>
-/// Event thô từ Webhook Service qua topic raw_events
-/// </summary>
-public class RawEvent
+public sealed class RawEvent
 {
     [JsonPropertyName("event_id")]
-    public string EventId { get; set; } = string.Empty;
+    public string EventId { get; init; } = string.Empty;
 
-    [JsonPropertyName("timestamp")]
-    public DateTime Timestamp { get; set; }
-
-    [JsonPropertyName("comment_id")]
-    public string CommentId { get; set; } = string.Empty;
-
-    [JsonPropertyName("post_id")]
-    public string PostId { get; set; } = string.Empty;
-
-    [JsonPropertyName("message")]
-    public string Message { get; set; } = string.Empty;
-
-    [JsonPropertyName("user_id")]
-    public string UserId { get; set; } = string.Empty;
-
-    [JsonPropertyName("user_name")]
-    public string UserName { get; set; } = string.Empty;
-}
-
-/// <summary>
-/// Command để gửi phản hồi tới Backend API qua topic reply_commands
-/// </summary>
-public class ReplyCommand
-{
-    [JsonPropertyName("command_id")]
-    public string CommandId { get; set; } = string.Empty;
-
-    [JsonPropertyName("event_id")]
-    public string EventId { get; set; } = string.Empty;
-
-    [JsonPropertyName("comment_id")]
-    public string CommentId { get; set; } = string.Empty;
-
-    [JsonPropertyName("post_id")]
-    public string PostId { get; set; } = string.Empty;
+    [JsonPropertyName("event_type")]
+    public string EventType { get; init; } = string.Empty;
 
     [JsonPropertyName("action")]
-    public string Action { get; set; } = string.Empty; // "reply", "hide", "pending_review", "block_user"
+    public string Action { get; init; } = string.Empty;
 
-    [JsonPropertyName("reply_text")]
-    public string ReplyText { get; set; } = string.Empty;
+    [JsonPropertyName("source")]
+    public string Source { get; init; } = "facebook";
 
-    [JsonPropertyName("reason")]
-    public string Reason { get; set; } = string.Empty; // "spam", "negative_sentiment", "pending_review"
+    [JsonPropertyName("page_id")]
+    public string? PageId { get; init; }
+
+    [JsonPropertyName("user_id")]
+    public string? UserId { get; init; }
+
+    [JsonPropertyName("user_name")]
+    public string? UserName { get; init; }
+
+    [JsonPropertyName("target_id")]
+    public string? TargetId { get; init; }
+
+    [JsonPropertyName("post_id")]
+    public string? PostId { get; init; }
+
+    [JsonPropertyName("parent_id")]
+    public string? ParentId { get; init; }
+
+    [JsonPropertyName("message")]
+    public string? Message { get; init; }
+
+    [JsonPropertyName("occurred_at")]
+    public DateTimeOffset OccurredAt { get; init; }
+
+    [JsonPropertyName("received_at")]
+    public DateTimeOffset ReceivedAt { get; init; }
+
+    [JsonPropertyName("raw_event")]
+    public JsonElement RawPayload { get; init; }
+}
+
+public sealed class FacebookCommand
+{
+    [JsonPropertyName("command_id")]
+    public string CommandId { get; init; } = string.Empty;
+
+    [JsonPropertyName("action")]
+    public string Action { get; init; } = string.Empty;
+
+    [JsonPropertyName("target_id")]
+    public string? TargetId { get; init; }
+
+    [JsonPropertyName("page_id")]
+    public string? PageId { get; init; }
+
+    [JsonPropertyName("message")]
+    public string? Message { get; init; }
 
     [JsonPropertyName("retry_count")]
-    public int RetryCount { get; set; }
+    public int RetryCount { get; init; }
 
-    [JsonPropertyName("timestamp")]
-    public DateTime Timestamp { get; set; }
+    [JsonPropertyName("event_id")]
+    public string? EventId { get; init; }
 }

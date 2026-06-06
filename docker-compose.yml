@@ -108,6 +108,51 @@ services:
       Kafka__BootstrapServers: kafka:29092
       Kafka__RawEventsTopic: raw_events
 
+  core-service:
+    build:
+      context: ./CoreService
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3002:3002"
+    environment:
+      ASPNETCORE_URLS: http://+:3002
+      ASPNETCORE_ENVIRONMENT: Development
+      Kafka__BootstrapServers: kafka:29092
+      Kafka__Topics__RawEvents: raw_events
+      Kafka__Topics__ReplyCommands: reply_commands
+      AiApi__Provider: OpenAI
+      AiApi__OpenAi__ApiKey: ${OPENAI_API_KEY:-}
+      AiApi__OpenAi__Model: ${OPENAI_MODEL:-gpt-5.4-mini}
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=fb_api_db;Username=fb_api_user;Password=fb_api_password
+
+  retry-service:
+    build:
+      context: ./Retry-Service
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    ports:
+      - "3003:3003"
+    environment:
+      ASPNETCORE_URLS: http://+:3003
+      ASPNETCORE_ENVIRONMENT: Development
+      Kafka__BootstrapServers: kafka:29092
+      Kafka__Topics__SendFailed: send_failed
+      Kafka__Topics__SendRetry: send_retry
+      Kafka__Topics__DeadLetter: dead_letter
+      RetryPolicy__MaxRetryAttempts: 5
+      RetryPolicy__InitialBackoffSeconds: 1
+      RetryPolicy__BackoffMultiplier: 2.0
+      RetryPolicy__MaxBackoffSeconds: 300
+
   kafka-exporter:
     image: danielqsj/kafka-exporter:latest
     depends_on:

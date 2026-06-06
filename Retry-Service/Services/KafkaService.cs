@@ -1,237 +1,268 @@
-using Confluent.Kafka;
 using System.Text.Json;
+using Confluent.Kafka;
+using Microsoft.Extensions.Options;
 using RetryService.Models;
 
 namespace RetryService.Services;
 
-public interface IKafkaConsumerService
+public sealed class KafkaOptions
 {
-    Task StartConsumingAsync(CancellationToken cancellationToken);
+    public const string SectionName = "Kafka";
+
+    public string BootstrapServers { get; set; } = "localhost:9092";
+    public string ConsumerGroupId { get; set; } = "retry-service-group";
+    public KafkaTopicsOptions Topics { get; set; } = new();
+}
+
+public sealed class KafkaTopicsOptions
+{
+    public string SendFailed { get; set; } = "send_failed";
+    public string SendRetry { get; set; } = "send_retry";
+    public string DeadLetter { get; set; } = "dead_letter";
 }
 
 public interface IKafkaProducerService
 {
-    Task PublishSendRetryAsync(SendRetryMessage message);
-    Task PublishDeadLetterAsync(DeadLetterMessage message);
+    Task PublishRetryCommandAsync(
+        FacebookCommand command,
+        CancellationToken cancellationToken);
+    Task PublishDeadLetterAsync(
+        DeadLetterMessage message,
+        CancellationToken cancellationToken);
 }
 
-public class KafkaConsumerWorkerService : BackgroundService
+public interface IBackoffDelay
 {
+    Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken);
+}
+
+public sealed class TaskBackoffDelay : IBackoffDelay
+{
+    public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken) =>
+        Task.Delay(delay, cancellationToken);
+}
+
+public sealed class RetryMessageProcessor
+{
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
+    private readonly IRetryLogicService _retryLogic;
+    private readonly IKafkaProducerService _producer;
+    private readonly IBackoffDelay _delay;
+    private readonly RetryPolicy _policy;
+    private readonly ILogger<RetryMessageProcessor> _logger;
+
+    public RetryMessageProcessor(
+        IRetryLogicService retryLogic,
+        IKafkaProducerService producer,
+        IBackoffDelay delay,
+        IOptions<RetryPolicy> policy,
+        ILogger<RetryMessageProcessor> logger)
+    {
+        _retryLogic = retryLogic;
+        _producer = producer;
+        _delay = delay;
+        _policy = policy.Value;
+        _logger = logger;
+    }
+
+    public async Task<bool> ProcessAsync(
+        string payload,
+        CancellationToken cancellationToken)
+    {
+        var message = JsonSerializer.Deserialize<SendFailedMessage>(
+            payload.TrimStart('\uFEFF'),
+            JsonOptions);
+        if (message?.Command is null ||
+            string.IsNullOrWhiteSpace(message.Command.CommandId))
+        {
+            _logger.LogError("Skipping invalid send_failed payload: {Payload}", payload);
+            return false;
+        }
+
+        var decision = _retryLogic.DetermineRetryAction(message, _policy);
+        if (!decision.ShouldRetry)
+        {
+            await _producer.PublishDeadLetterAsync(
+                new DeadLetterMessage
+                {
+                    Command = message.Command,
+                    RetryCount = message.RetryCount,
+                    Retryable = message.Retryable,
+                    Error = message.Error,
+                    FailedAt = message.FailedAt,
+                    DeadLetteredAt = DateTimeOffset.UtcNow,
+                    Reason = decision.Reason
+                },
+                cancellationToken);
+            return true;
+        }
+
+        _logger.LogInformation(
+            "Retrying command {CommandId} after {BackoffSeconds}s",
+            message.Command.CommandId,
+            decision.Backoff.TotalSeconds);
+
+        await _delay.DelayAsync(decision.Backoff, cancellationToken);
+        await _producer.PublishRetryCommandAsync(
+            message.Command with { RetryCount = message.RetryCount + 1 },
+            cancellationToken);
+        return true;
+    }
+}
+
+public sealed class KafkaConsumerWorkerService : BackgroundService
+{
+    private readonly KafkaOptions _options;
+    private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<KafkaConsumerWorkerService> _logger;
-    private readonly IConfiguration _configuration;
-    private readonly IRetryLogicService _retryLogicService;
-    private readonly IKafkaProducerService _producerService;
 
     public KafkaConsumerWorkerService(
-        ILogger<KafkaConsumerWorkerService> logger,
-        IConfiguration configuration,
-        IRetryLogicService retryLogicService,
-        IKafkaProducerService producerService)
+        IOptions<KafkaOptions> options,
+        IServiceProvider serviceProvider,
+        ILogger<KafkaConsumerWorkerService> logger)
     {
+        _options = options.Value;
+        _serviceProvider = serviceProvider;
         _logger = logger;
-        _configuration = configuration;
-        _retryLogicService = retryLogicService;
-        _producerService = producerService;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("Retry Service Kafka Consumer Worker starting...");
-
-        var kafkaConfig = _configuration.GetSection("Kafka");
-        string bootstrapServers = kafkaConfig.GetValue<string>("BootstrapServers") ?? "localhost:9092";
-        string consumerGroupId = kafkaConfig.GetValue<string>("ConsumerGroupId") ?? "retry-service-group";
-        string sendFailedTopic = kafkaConfig.GetSection("Topics").GetValue<string>("SendFailed") ?? "send_failed";
-
         var consumerConfig = new ConsumerConfig
         {
-            BootstrapServers = bootstrapServers,
-            GroupId = consumerGroupId,
+            BootstrapServers = _options.BootstrapServers,
+            GroupId = _options.ConsumerGroupId,
             AutoOffsetReset = AutoOffsetReset.Earliest,
-            EnableAutoCommit = true,
-            StatisticsIntervalMs = 5000,
-            SessionTimeoutMs = 30000
+            EnableAutoCommit = false,
+            EnableAutoOffsetStore = false,
+            AllowAutoCreateTopics = false
         };
 
         using var consumer = new ConsumerBuilder<string, string>(consumerConfig)
-            .SetErrorHandler((_, e) => _logger.LogError("Kafka error: {Error}", e.Reason))
+            .SetErrorHandler((_, error) => _logger.LogError("Kafka error: {Reason}", error.Reason))
             .Build();
 
-        consumer.Subscribe(sendFailedTopic);
-        _logger.LogInformation("Subscribed to topic: {Topic}", sendFailedTopic);
+        consumer.Subscribe(_options.Topics.SendFailed);
+        _logger.LogInformation("Retry Service subscribed to {Topic}", _options.Topics.SendFailed);
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            ConsumeResult<string, string>? result = null;
             try
             {
-                var cr = consumer.Consume(stoppingToken);
-                if (cr == null || string.IsNullOrEmpty(cr.Message.Value))
+                result = consumer.Consume(stoppingToken);
+                if (result is null || result.IsPartitionEOF)
+                {
                     continue;
+                }
 
-                _logger.LogInformation(
-                    "Received message from {Topic}@{Partition}[{Offset}]",
-                    cr.Topic, cr.Partition, cr.Offset);
+                using var scope = _serviceProvider.CreateScope();
+                var processor = scope.ServiceProvider.GetRequiredService<RetryMessageProcessor>();
+                await processor.ProcessAsync(result.Message.Value, stoppingToken);
 
-                await ProcessFailedMessageAsync(cr.Message.Value, stoppingToken);
+                consumer.StoreOffset(result);
+                consumer.Commit(result);
             }
-            catch (OperationCanceledException)
+            catch (JsonException ex)
+            {
+                _logger.LogError(ex, "Skipping malformed send_failed payload");
+                if (result is not null)
+                {
+                    consumer.Commit(result);
+                }
+            }
+            catch (ConsumeException ex)
+            {
+                _logger.LogError(ex, "Kafka consume failed");
+                await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
                 break;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error consuming message from Kafka");
-                await Task.Delay(5000, stoppingToken);
+                _logger.LogError(ex, "Retry processing failed; seeking message for retry");
+                if (result is not null)
+                {
+                    consumer.Seek(result.TopicPartitionOffset);
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
             }
         }
 
         consumer.Close();
-        _logger.LogInformation("Retry Service Kafka Consumer Worker stopped");
-    }
-
-    private async Task ProcessFailedMessageAsync(string messageJson, CancellationToken cancellationToken)
-    {
-        try
-        {
-            var message = JsonSerializer.Deserialize<SendFailedMessage>(messageJson);
-            if (message == null)
-            {
-                _logger.LogWarning("Failed to deserialize message: {MessageJson}", messageJson);
-                return;
-            }
-
-            var policy = new RetryPolicy();
-            var (shouldRetry, nextRetryTime, backoffSeconds) = 
-                _retryLogicService.DetermineRetryAction(message, policy);
-
-            if (shouldRetry)
-            {
-                var retryMessage = new SendRetryMessage
-                {
-                    CommandId = message.CommandId,
-                    EventId = message.EventId,
-                    Action = message.Action,
-                    ReplyText = message.ReplyText,
-                    Timestamp = message.Timestamp,
-                    RetryCount = message.RetryCount + 1,
-                    NextRetryTime = nextRetryTime,
-                    LastError = message.LastError
-                };
-
-                _logger.LogInformation(
-                    "Publishing retry message for command {CommandId} to send_retry topic",
-                    message.CommandId);
-                await _producerService.PublishSendRetryAsync(retryMessage);
-            }
-            else
-            {
-                var dlqMessage = new DeadLetterMessage
-                {
-                    CommandId = message.CommandId,
-                    EventId = message.EventId,
-                    Action = message.Action,
-                    ReplyText = message.ReplyText,
-                    OriginalTimestamp = message.Timestamp,
-                    FailedAt = DateTime.UtcNow,
-                    TotalRetries = message.RetryCount,
-                    LastError = message.LastError,
-                    Reason = $"Max retry attempts ({new RetryPolicy().MaxRetryAttempts}) exceeded"
-                };
-
-                _logger.LogError(
-                    "Moving command {CommandId} to Dead Letter Queue after {TotalRetries} retries",
-                    message.CommandId, message.RetryCount);
-                await _producerService.PublishDeadLetterAsync(dlqMessage);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error processing failed message");
-        }
     }
 }
 
-public class KafkaProducerService : IKafkaProducerService
+public sealed class KafkaProducerService : IKafkaProducerService, IDisposable
 {
-    private readonly ILogger<KafkaProducerService> _logger;
-    private readonly IConfiguration _configuration;
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    private readonly KafkaOptions _options;
     private readonly IProducer<string, string> _producer;
+    private readonly ILogger<KafkaProducerService> _logger;
 
-    public KafkaProducerService(ILogger<KafkaProducerService> logger, IConfiguration configuration)
+    public KafkaProducerService(
+        IOptions<KafkaOptions> options,
+        ILogger<KafkaProducerService> logger)
     {
+        _options = options.Value;
         _logger = logger;
-        _configuration = configuration;
-
-        var kafkaConfig = _configuration.GetSection("Kafka");
-        string bootstrapServers = kafkaConfig.GetValue<string>("BootstrapServers") ?? "localhost:9092";
-
-        var producerConfig = new ProducerConfig
+        _producer = new ProducerBuilder<string, string>(new ProducerConfig
         {
-            BootstrapServers = bootstrapServers,
-            Acks = Acks.Leader,
+            BootstrapServers = _options.BootstrapServers,
+            Acks = Acks.All,
             EnableIdempotence = true,
-            RetryBackoffMs = 100,
+            MessageSendMaxRetries = 5,
+            RetryBackoffMs = 200,
             MessageTimeoutMs = 30000
-        };
-
-        _producer = new ProducerBuilder<string, string>(producerConfig)
-            .SetErrorHandler((_, e) => _logger.LogError("Producer error: {Error}", e.Reason))
-            .Build();
+        })
+        .SetErrorHandler((_, error) => _logger.LogError("Kafka producer error: {Reason}", error.Reason))
+        .Build();
     }
 
-    public async Task PublishSendRetryAsync(SendRetryMessage message)
+    public Task PublishRetryCommandAsync(
+        FacebookCommand command,
+        CancellationToken cancellationToken) =>
+        ProduceAsync(_options.Topics.SendRetry, command.CommandId, command, cancellationToken);
+
+    public Task PublishDeadLetterAsync(
+        DeadLetterMessage message,
+        CancellationToken cancellationToken) =>
+        ProduceAsync(_options.Topics.DeadLetter, message.Command.CommandId, message, cancellationToken);
+
+    private async Task ProduceAsync<T>(
+        string topic,
+        string key,
+        T message,
+        CancellationToken cancellationToken)
     {
-        try
-        {
-            var kafkaConfig = _configuration.GetSection("Kafka");
-            string sendRetryTopic = kafkaConfig.GetSection("Topics").GetValue<string>("SendRetry") ?? "send_retry";
-            string messageJson = JsonSerializer.Serialize(message);
+        var result = await _producer.ProduceAsync(
+            topic,
+            new Message<string, string>
+            {
+                Key = key,
+                Value = JsonSerializer.Serialize(message, JsonOptions)
+            },
+            cancellationToken);
 
-            var result = await _producer.ProduceAsync(
-                sendRetryTopic,
-                new Message<string, string>
-                {
-                    Key = message.CommandId,
-                    Value = messageJson
-                });
-
-            _logger.LogInformation(
-                "Published send_retry message for command {CommandId} to topic {Topic} " +
-                "at offset {Offset}",
-                message.CommandId, sendRetryTopic, result.Offset);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error publishing send_retry message for command {CommandId}", message.CommandId);
-            throw;
-        }
+        _logger.LogInformation(
+            "Published message with key {Key} to {Topic}@{Partition}[{Offset}]",
+            key,
+            result.Topic,
+            result.Partition,
+            result.Offset);
     }
 
-    public async Task PublishDeadLetterAsync(DeadLetterMessage message)
+    public void Dispose()
     {
-        try
-        {
-            var kafkaConfig = _configuration.GetSection("Kafka");
-            string deadLetterTopic = kafkaConfig.GetSection("Topics").GetValue<string>("DeadLetter") ?? "dead_letter";
-            string messageJson = JsonSerializer.Serialize(message);
-
-            var result = await _producer.ProduceAsync(
-                deadLetterTopic,
-                new Message<string, string>
-                {
-                    Key = message.CommandId,
-                    Value = messageJson
-                });
-
-            _logger.LogError(
-                "Published dead letter message for command {CommandId} to topic {Topic} " +
-                "at offset {Offset}. Reason: {Reason}",
-                message.CommandId, deadLetterTopic, result.Offset, message.Reason);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error publishing dead letter message for command {CommandId}", message.CommandId);
-            throw;
-        }
+        _producer.Flush(TimeSpan.FromSeconds(5));
+        _producer.Dispose();
     }
 }
