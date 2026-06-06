@@ -26,6 +26,12 @@ app.UseSwagger();
 app.UseSwaggerUI();
 app.UseAuthorization();
 app.MapControllers();
+app.MapGet("/health", () => Results.Ok(new
+{
+    status = "healthy",
+    service = "retry-service",
+    timestamp = DateTimeOffset.UtcNow
+}));
 
 app.Run();
 

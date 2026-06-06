@@ -41,6 +41,8 @@ public sealed class KafkaConsumerWorkerService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await Task.Yield();
+
         var config = new ConsumerConfig
         {
             BootstrapServers = _options.BootstrapServers,
@@ -172,6 +174,18 @@ public sealed class KafkaEventProcessor : IKafkaEventProcessor
                 return;
             }
 
+            if (IsPageAuthoredEvent(rawEvent))
+            {
+                await _store.MarkSkippedAsync(
+                    rawEvent.EventId,
+                    "page_authored_event",
+                    cancellationToken);
+                _logger.LogInformation(
+                    "Skipping page-authored comment event {EventId}",
+                    rawEvent.EventId);
+                return;
+            }
+
             if (string.IsNullOrWhiteSpace(rawEvent.TargetId))
             {
                 await _store.MarkSkippedAsync(rawEvent.EventId, "missing_target_id", cancellationToken);
@@ -283,6 +297,11 @@ public sealed class KafkaEventProcessor : IKafkaEventProcessor
     private static bool IsSupportedCommentAdd(RawEvent rawEvent) =>
         string.Equals(rawEvent.EventType, "comment", StringComparison.OrdinalIgnoreCase) &&
         string.Equals(rawEvent.Action, "add", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsPageAuthoredEvent(RawEvent rawEvent) =>
+        !string.IsNullOrWhiteSpace(rawEvent.PageId) &&
+        !string.IsNullOrWhiteSpace(rawEvent.UserId) &&
+        string.Equals(rawEvent.PageId, rawEvent.UserId, StringComparison.Ordinal);
 
     private static FacebookCommand BuildCommand(RawEvent rawEvent, AutomationAction action) =>
         new()

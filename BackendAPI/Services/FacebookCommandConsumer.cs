@@ -43,6 +43,8 @@ public sealed class FacebookCommandConsumer : BackgroundService
             return;
         }
 
+        await Task.Yield();
+
         var config = new ConsumerConfig
         {
             BootstrapServers = _options.BootstrapServers,

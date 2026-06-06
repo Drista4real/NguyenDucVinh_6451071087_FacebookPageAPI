@@ -62,6 +62,36 @@ public sealed class KafkaEventProcessorTests
     }
 
     [Fact]
+    public async Task ProcessRawEventAsync_SkipsPageAuthoredComment()
+    {
+        var store = new FakeCoreEventStore();
+        var producer = new FakeProducer();
+        var ai = new FakeAi(new AiAnalysisResult { Intent = "positive_feedback" });
+        var processor = CreateProcessor(store, producer, ai);
+        var rawEvent = CreateComment("Cam on ban da phan hoi tich cuc.");
+        rawEvent = new RawEvent
+        {
+            EventId = rawEvent.EventId,
+            EventType = rawEvent.EventType,
+            Action = rawEvent.Action,
+            PageId = rawEvent.PageId,
+            UserId = "page-1",
+            TargetId = rawEvent.TargetId,
+            PostId = rawEvent.PostId,
+            Message = rawEvent.Message,
+            OccurredAt = rawEvent.OccurredAt,
+            ReceivedAt = rawEvent.ReceivedAt
+        };
+
+        await processor.ProcessRawEventAsync(rawEvent, default);
+
+        Assert.Empty(producer.Commands);
+        Assert.Equal(0, ai.CallCount);
+        Assert.Equal("skipped", store.StatusByEvent["event-1"]);
+        Assert.Equal("page_authored_event", store.ReasonByEvent["event-1"]);
+    }
+
+    [Fact]
     public async Task ProcessRawEventAsync_DoesNotReprocessDuplicateEvent()
     {
         var store = new FakeCoreEventStore { StartResult = false };

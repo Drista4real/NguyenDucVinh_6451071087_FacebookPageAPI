@@ -43,6 +43,12 @@ app.UseSwagger();
 app.UseSwaggerUI();
 app.UseAuthorization();
 app.MapControllers();
+app.MapGet("/health", () => Results.Ok(new
+{
+    status = "healthy",
+    service = "core-service",
+    timestamp = DateTimeOffset.UtcNow
+}));
 
 app.Run();
 
