@@ -1,0 +1,40 @@
+@BackendAPI_HostAddress = http://localhost:5225
+@ApiKey = change-me
+@PageId = your-page-id
+@PostId = your-page-post-id
+@CommentId = your-comment-id
+
+GET {{BackendAPI_HostAddress}}/health
+Accept: application/json
+
+###
+
+GET {{BackendAPI_HostAddress}}/posts?pageId={{PageId}}&limit=10
+X-API-Key: {{ApiKey}}
+Accept: application/json
+
+###
+
+POST {{BackendAPI_HostAddress}}/post?pageId={{PageId}}
+X-API-Key: {{ApiKey}}
+Content-Type: application/json
+
+{
+  "message": "Bài viết được tạo từ backend API"
+}
+
+###
+
+GET {{BackendAPI_HostAddress}}/comments?postId={{PostId}}
+X-API-Key: {{ApiKey}}
+Accept: application/json
+
+###
+
+POST {{BackendAPI_HostAddress}}/api/page/comment/{{CommentId}}/reply
+X-API-Key: {{ApiKey}}
+Content-Type: application/json
+
+{
+  "message": "Cảm ơn bạn đã liên hệ!"
+}
