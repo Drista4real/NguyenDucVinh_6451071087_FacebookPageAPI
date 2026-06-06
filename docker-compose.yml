@@ -90,6 +90,24 @@ services:
       Kafka__BootstrapServers: kafka:29092
       ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=fb_api_db;Username=fb_api_user;Password=fb_api_password
 
+  webhook-service:
+    build:
+      context: ./Webhook-Service
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    ports:
+      - "3001:3001"
+    environment:
+      ASPNETCORE_URLS: http://+:3001
+      ASPNETCORE_ENVIRONMENT: Development
+      Facebook__VerifyToken: ${FACEBOOK_WEBHOOK_VERIFY_TOKEN:-}
+      Facebook__AppSecret: ${FACEBOOK_APP_SECRET:-}
+      Kafka__BootstrapServers: kafka:29092
+      Kafka__RawEventsTopic: raw_events
+
   kafka-exporter:
     image: danielqsj/kafka-exporter:latest
     depends_on:
