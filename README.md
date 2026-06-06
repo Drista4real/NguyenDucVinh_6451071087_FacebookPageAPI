@@ -1,8 +1,7 @@
-# Facebook Page Backend API
+# Facebook Page API System
 
-Backend ASP.NET Core 8 theo yêu cầu trong `fb_pages.pdf`. Service chạy ở port
-`3000`, là thành phần duy nhất gọi Meta Graph API, phục vụ dashboard và consume
-Kafka topic `reply_commands`/`send_retry`.
+Hệ thống ASP.NET Core 8 gồm Backend API và Webhook Service theo yêu cầu trong
+`fb_pages.pdf`.
 
 ## Chức năng
 
@@ -15,6 +14,31 @@ Kafka topic `reply_commands`/`send_retry`.
 - Kafka consumer idempotent bằng bảng PostgreSQL `idempotency_keys`
 - Publish lỗi sang `send_failed` để `retry-service` xử lý
 - Swagger, Kafka UI, Prometheus và Alertmanager
+
+## Webhook Service
+
+`webhook-service` chạy ở port `3001` và cung cấp:
+
+- `GET /webhook`: Meta callback verification qua `hub.mode`,
+  `hub.verify_token` và `hub.challenge`
+- `POST /webhook`: xác thực header `X-Hub-Signature-256` bằng HMAC-SHA256
+- Normalize Page comment và Messenger message về cùng schema
+- Bỏ qua Messenger echo để tránh vòng lặp phản hồi
+- Publish event vào Kafka topic `raw_events` với `event_id` ổn định làm message key
+- Giới hạn payload mặc định 2 MB và trả `503` khi Kafka lỗi để Meta retry
+
+Secret không được lưu trong source. Cấu hình bằng:
+
+```text
+FACEBOOK_APP_SECRET=...
+FACEBOOK_WEBHOOK_VERIFY_TOKEN=...
+```
+
+Callback URL khi deploy phải là HTTPS public:
+
+```text
+https://your-domain/webhook
+```
 
 ## Cấu hình Facebook
 
@@ -41,6 +65,9 @@ docker compose ps
 
 - Swagger: http://localhost:3000/swagger
 - Health: http://localhost:3000/health
+- Webhook Swagger: http://localhost:3001/swagger
+- Webhook Health: http://localhost:3001/health
+- Facebook callback: http://localhost:3001/webhook
 - Kafka UI: http://localhost:8080
 - Prometheus: http://localhost:9090
 - Alertmanager: http://localhost:9093
@@ -86,5 +113,6 @@ Action hỗ trợ: `reply_comment`, `hide_comment`, `unhide_comment`,
 
 ```powershell
 dotnet build BackendAPI/BackendAPI.csproj
+dotnet test Webhook-Service.Tests/Webhook-Service.Tests.csproj
 docker compose config
 ```
