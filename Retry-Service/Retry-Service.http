@@ -1,0 +1,8 @@
+### Health Check - Basic Status
+GET http://localhost:3003/api/health/health
+
+### Readiness Check - Service Ready
+GET http://localhost:3003/api/health/ready
+
+### Swagger UI
+GET http://localhost:3003/swagger
